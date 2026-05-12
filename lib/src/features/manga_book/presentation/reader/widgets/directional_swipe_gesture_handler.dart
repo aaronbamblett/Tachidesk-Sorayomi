@@ -10,6 +10,7 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import '../../../../../constants/enum.dart';
 import '../../../../../routes/router_config.dart';
 import '../../../../../widgets/zoom/reader_gesture_diagnostics.dart';
+import '../../../../../widgets/zoom/single_touch_drag_recognizers.dart';
 import '../../../domain/chapter/chapter_model.dart';
 import '../../../domain/chapter_page/chapter_page_model.dart';
 import '../utils/last_page_swipe_utils.dart';
@@ -58,63 +59,93 @@ class DirectionalSwipeGestureHandler extends HookWidget {
   Widget build(BuildContext context) {
     final bool useAdvancedGestures =
         lastPageSwipeEnabled && !readerSwipeChapterToggle;
-
-    if (useAdvancedGestures) {
-      return _buildAdvancedGestureHandler(context);
-    } else {
-      return _buildSimpleGestureHandler(context);
-    }
+    return useAdvancedGestures
+        ? _buildAdvancedGestureHandler(context)
+        : _buildSimpleGestureHandler(context);
   }
 
-  /// Advanced gesture handler using RawGestureDetector for proper arena competition
+  /// Advanced gesture handler — single-touch pan recognizer for swipe-at-
+  /// last-page; tap + long-press in a nested GestureDetector (those don't
+  /// fight multi-touch).
   Widget _buildAdvancedGestureHandler(BuildContext context) {
-    return GestureDetector(
-      onLongPressStart: onLongPressStart,
-      onLongPressEnd: onLongPressEnd,
-      onLongPressMoveUpdate: onLongPressMoveUpdate,
-      onTap: onTap,
+    return RawGestureDetector(
       behavior: HitTestBehavior.translucent,
-      onPanEnd: (details) {
-        ReaderGestureDiagnostics.instance.bumpOuterPanEnd();
-        final swipeDirection = LastPageSwipeUtils.detectSwipeDirection(details);
-
-        if (swipeDirection != null) {
-          _handleAdvancedSwipeGesture(
-            context: context,
-            direction: swipeDirection,
-            details: details,
-          );
-        }
+      gestures: <Type, GestureRecognizerFactory>{
+        SingleTouchPanGestureRecognizer:
+            GestureRecognizerFactoryWithHandlers<SingleTouchPanGestureRecognizer>(
+          () => SingleTouchPanGestureRecognizer(debugOwner: this),
+          (recognizer) {
+            recognizer.onEnd = (details) {
+              ReaderGestureDiagnostics.instance.bumpOuterPanEnd();
+              final swipeDirection =
+                  LastPageSwipeUtils.detectSwipeDirection(details);
+              if (swipeDirection != null) {
+                _handleAdvancedSwipeGesture(
+                  context: context,
+                  direction: swipeDirection,
+                  details: details,
+                );
+              }
+            };
+          },
+        ),
       },
-      child: child,
+      child: GestureDetector(
+        behavior: HitTestBehavior.translucent,
+        onLongPressStart: onLongPressStart,
+        onLongPressEnd: onLongPressEnd,
+        onLongPressMoveUpdate: onLongPressMoveUpdate,
+        onTap: onTap,
+        child: child,
+      ),
     );
   }
 
-  /// Simple gesture handler as fallback
+  /// Simple gesture handler — single-touch horizontal + vertical drag
+  /// recognizers for swipe-at-chapter-boundary; tap + long-press nested.
   Widget _buildSimpleGestureHandler(BuildContext context) {
-    return GestureDetector(
-      onLongPressStart: onLongPressStart,
-      onLongPressEnd: onLongPressEnd,
-      onLongPressMoveUpdate: onLongPressMoveUpdate,
-      onTap: onTap,
+    return RawGestureDetector(
       behavior: HitTestBehavior.translucent,
-      onHorizontalDragEnd: (details) {
-        ReaderGestureDiagnostics.instance.bumpOuterPanEnd();
-        _handleSwipeGesture(
-          context: context,
-          details: details,
-          allowedAxis: Axis.vertical,
-        );
+      gestures: <Type, GestureRecognizerFactory>{
+        SingleTouchHorizontalDragGestureRecognizer:
+            GestureRecognizerFactoryWithHandlers<
+                SingleTouchHorizontalDragGestureRecognizer>(
+          () => SingleTouchHorizontalDragGestureRecognizer(debugOwner: this),
+          (recognizer) {
+            recognizer.onEnd = (details) {
+              ReaderGestureDiagnostics.instance.bumpOuterPanEnd();
+              _handleSwipeGesture(
+                context: context,
+                details: details,
+                allowedAxis: Axis.vertical,
+              );
+            };
+          },
+        ),
+        SingleTouchVerticalDragGestureRecognizer:
+            GestureRecognizerFactoryWithHandlers<
+                SingleTouchVerticalDragGestureRecognizer>(
+          () => SingleTouchVerticalDragGestureRecognizer(debugOwner: this),
+          (recognizer) {
+            recognizer.onEnd = (details) {
+              ReaderGestureDiagnostics.instance.bumpOuterPanEnd();
+              _handleSwipeGesture(
+                context: context,
+                details: details,
+                allowedAxis: Axis.horizontal,
+              );
+            };
+          },
+        ),
       },
-      onVerticalDragEnd: (details) {
-        ReaderGestureDiagnostics.instance.bumpOuterPanEnd();
-        _handleSwipeGesture(
-          context: context,
-          details: details,
-          allowedAxis: Axis.horizontal,
-        );
-      },
-      child: child,
+      child: GestureDetector(
+        behavior: HitTestBehavior.translucent,
+        onLongPressStart: onLongPressStart,
+        onLongPressEnd: onLongPressEnd,
+        onLongPressMoveUpdate: onLongPressMoveUpdate,
+        onTap: onTap,
+        child: child,
+      ),
     );
   }
 

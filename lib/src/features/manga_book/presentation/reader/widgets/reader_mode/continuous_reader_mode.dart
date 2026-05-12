@@ -17,11 +17,11 @@ import '../../../../../../utils/extensions/custom_extensions.dart';
 import '../../../../../../utils/misc/app_utils.dart';
 import '../../../../../../widgets/server_image.dart';
 import '../../../../../settings/presentation/reader/widgets/reader_pinch_to_zoom/reader_pinch_to_zoom.dart';
-import '../../../../../settings/presentation/reader/widgets/reader_scroll_animation_tile/reader_scroll_animation_tile.dart';
 import '../../../../data/manga_book/manga_book_repository.dart';
 import '../../../../domain/chapter/chapter_model.dart';
 import '../../../../domain/chapter_batch/chapter_batch_model.dart';
 import '../../../../domain/manga/manga_model.dart';
+import '../../../manga_details/controller/manga_details_controller.dart';
 import '../../controller/reader_controller.dart';
 import '../../controller/reader_item.dart';
 import '../chapter_separator.dart';
@@ -35,15 +35,10 @@ class _ScrollConfig {
   /// ignored when deciding which page is "currently being read".
   static const double minVisibleAreaThreshold = 0.4;
 
-  /// Delay before allowing programmatic navigation again after the user
-  /// finishes scrolling — prevents the slider from yanking the viewport
-  /// mid-scroll.
-  static const Duration programmaticNavigationDelay =
-      Duration(milliseconds: 800);
-
-  /// Debounce on chapter-change detection to avoid thrashing across a
-  /// boundary on fast scrolls.
-  static const Duration activeChapterDebounce = Duration(milliseconds: 250);
+  /// Pre-fetch the next / previous chapter when the user's most-visible
+  /// item is within this many positions of the start or end of the loaded
+  /// items list.
+  static const int preFetchPagesThreshold = 5;
 }
 
 class ContinuousReaderMode extends HookConsumerWidget {
@@ -71,59 +66,32 @@ class ContinuousReaderMode extends HookConsumerWidget {
     final ItemPositionsListener positionsListener =
         useMemoized(() => ItemPositionsListener.create());
 
-    // The chapter the user is currently reading. Starts at the route's
-    // initial chapter, updates as the user scrolls across boundaries.
+    // The full list of chapters for this manga, in reading order.
+    final mangaChapterList = ref
+        .watch(mangaChapterListProvider(mangaId: manga.id))
+        .valueOrNull;
+
+    // The set of chapter IDs whose pages we have currently loaded into
+    // the reader. ORDERED by reading order. Grows as the user approaches
+    // either end. Never shrinks during a session — old chapters stay
+    // around so backward scrolling still works without re-fetching.
+    final loadedChapterIds = useState<List<int>>([initialChapterId]);
+
+    // The chapter the user is currently looking at — derived from the
+    // most-visible item. Drives the wrapper / slider state. Never drives
+    // the items list shape.
     final activeChapterId = useState<int>(initialChapterId);
+    final currentPageInChapter = useState<int>(0);
 
-    // Items composed from prev + current + next chapters. Grows as
-    // neighbours' pages load; shrinks at the seams when activeChapterId
-    // advances.
-    final items = ref.watch(readerItemsProvider(
-      mangaId: manga.id,
-      activeChapterId: activeChapterId.value,
-    ));
+    // Anchor: which (chapter, page) the user is most-visibly looking at.
+    // Used to keep their viewport stable when the items list grows at
+    // the start (the previous chapter just loaded in).
+    final anchorChapterId = useState<int>(initialChapterId);
+    final anchorPageIndex = useState<int>(0);
 
-    final activeChapter = ref
-        .watch(chapterProvider(chapterId: activeChapterId.value))
-        .valueOrNull;
-    final activeChapterPages = ref
-        .watch(chapterPagesProvider(chapterId: activeChapterId.value))
-        .valueOrNull;
-
-    // Local page index within the active chapter — drives the reader's
-    // progress bar / slider. Initialised from the active chapter's
-    // last-read page on first build.
-    final currentPageInChapter = useState<int>(
-      activeChapter?.isRead.ifNull() ?? false
-          ? 0
-          : (activeChapter?.lastPageRead).getValueOnNullOrNegative(),
-    );
-
-    final lastReportedChapterId = useState<int>(activeChapterId.value);
-
-    final ObjectRef<Timer?> positionUpdateTimer = useRef<Timer?>(null);
-    final ObjectRef<Timer?> activeChapterDebounce = useRef<Timer?>(null);
-    final isUserScrolling = useState<bool>(false);
-    final isNavigatingFromSlider = useState<bool>(false);
-
-    // Track which chapter IDs have already had mark-as-read fired in this
-    // reader session so we don't spam the GraphQL mutation on every scroll
-    // tick once we've passed a boundary.
+    // Mark-as-read dedupe across the reader session.
     final markedAsRead = useRef<Set<int>>(<int>{});
 
-    useEffect(() {
-      return () {
-        positionUpdateTimer.value?.cancel();
-        activeChapterDebounce.value?.cancel();
-        positionUpdateTimer.value = null;
-        activeChapterDebounce.value = null;
-      };
-    }, const []);
-
-    // Mark-as-read pipeline: fires once per chapter when the user scrolls
-    // its last page out of the viewport going forwards. Uses the existing
-    // mangaBookRepository.putChapter mutation to mirror the previous
-    // reader_screen behaviour.
     Future<void> markChapterAsRead(int chapterId) async {
       if (markedAsRead.value.contains(chapterId)) return;
       markedAsRead.value = {...markedAsRead.value, chapterId};
@@ -138,14 +106,88 @@ class ContinuousReaderMode extends HookConsumerWidget {
       );
     }
 
-    // Position listener — recomputes "which item is most visible", then
-    // derives (activeChapter, localPageIndex). When the active chapter
-    // changes, bumps the state notifier and schedules read-marking on the
-    // chapter just left behind.
+    // Build the items list locally from the set of loaded chapters. The
+    // widget watches each loaded chapter's provider individually; Riverpod
+    // de-duplicates and caches, and pre-fetching is just "add a chapter
+    // ID to the loaded list — its pages stream in shortly after".
+    final items = <ReaderItem>[];
+    final loadedChapters = <int, ChapterDto>{};
+    for (final id in loadedChapterIds.value) {
+      final chapter =
+          ref.watch(chapterProvider(chapterId: id)).valueOrNull;
+      if (chapter != null) loadedChapters[id] = chapter;
+    }
+    for (var i = 0; i < loadedChapterIds.value.length; i++) {
+      final id = loadedChapterIds.value[i];
+      final chapter = loadedChapters[id];
+      final pages =
+          ref.watch(chapterPagesProvider(chapterId: id)).valueOrNull;
+      if (chapter == null || pages == null) continue;
+      for (var p = 0; p < pages.pages.length; p++) {
+        items.add(ReaderItemPage(
+          chapter: chapter,
+          pageIndex: p,
+          pageCount: pages.pages.length,
+          url: pages.pages[p],
+        ));
+      }
+      // Separator between this and the next loaded chapter, if there
+      // is one.
+      if (i < loadedChapterIds.value.length - 1) {
+        final nextId = loadedChapterIds.value[i + 1];
+        final nextChapter = loadedChapters[nextId];
+        if (nextChapter != null) {
+          items.add(ReaderItemSeparator(
+            endingChapter: chapter,
+            startingChapter: nextChapter,
+          ));
+        }
+      }
+    }
+
+    final activeChapter = loadedChapters[activeChapterId.value];
+    final activeChapterPages = ref
+        .watch(chapterPagesProvider(chapterId: activeChapterId.value))
+        .valueOrNull;
+
+    // Scroll-anchor preservation: when items list grows at the start
+    // (previous chapter pages just loaded in), the user's anchor item
+    // moves to a higher global index. Detect by tracking whether items
+    // changed length and the anchor's new index differs from the current
+    // most-visible-index; if so, jump to the anchor's new index so the
+    // user's viewport stays put visually.
+    final previousItemsLength = useRef<int>(0);
+    final anchorGlobalIndex = items.indexWhere(
+      (item) =>
+          item is ReaderItemPage &&
+          item.chapter.id == anchorChapterId.value &&
+          item.pageIndex == anchorPageIndex.value,
+    );
+    useEffect(() {
+      if (previousItemsLength.value != 0 &&
+          items.length != previousItemsLength.value &&
+          anchorGlobalIndex >= 0) {
+        final positions = positionsListener.itemPositions.value;
+        if (positions.isNotEmpty) {
+          final mostVisible = _mostVisibleIndex(positions.toList());
+          if (mostVisible != null && mostVisible != anchorGlobalIndex) {
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (scrollController.isAttached) {
+                scrollController.jumpTo(index: anchorGlobalIndex);
+              }
+            });
+          }
+        }
+      }
+      previousItemsLength.value = items.length;
+      return null;
+    });
+
+    // Position listener: drives active chapter, current page,
+    // mark-as-read, and pre-fetch in both directions. Reads each tick
+    // and operates on the latest items snapshot via closure capture.
     useEffect(() {
       void listener() {
-        if (isNavigatingFromSlider.value) return;
-
         final positions = positionsListener.itemPositions.value.toList();
         if (positions.isEmpty || items.isEmpty) return;
 
@@ -154,79 +196,75 @@ class ContinuousReaderMode extends HookConsumerWidget {
         if (mostVisibleIndex < 0 || mostVisibleIndex >= items.length) return;
 
         final item = items[mostVisibleIndex];
-        final chapterAtCursor = item.owningChapter;
 
-        // Update local page index within whatever chapter we're in.
+        // Update anchor (used by the scroll-preservation effect above).
+        anchorChapterId.value = item.owningChapter.id;
+        anchorPageIndex.value =
+            item is ReaderItemPage ? item.pageIndex : 0;
+
+        // Update active chapter / current page.
         if (item is ReaderItemPage) {
           if (currentPageInChapter.value != item.pageIndex &&
-              chapterAtCursor.id == activeChapterId.value) {
+              item.chapter.id == activeChapterId.value) {
             currentPageInChapter.value = item.pageIndex;
           }
-
-          // Mark the active chapter as read when the user reaches its
-          // last page. Catches both the normal case (we'll also mark on
-          // boundary crossing below) and the very-last-chapter case where
-          // there is no next chapter to cross into.
           if (item.isLastPageOfChapter &&
-              chapterAtCursor.id == activeChapterId.value) {
-            markChapterAsRead(chapterAtCursor.id);
+              item.chapter.id == activeChapterId.value) {
+            markChapterAsRead(item.chapter.id);
           }
         }
 
-        // Also handle the "last image is shorter than the viewport"
-        // edge case: if the very last item in the items list is in view
-        // and the scroll has reached its end, treat the active chapter
-        // as fully viewed. Mirrors the webtoon-read-detection fix on the
-        // new multi-chapter item list.
-        if (mostVisibleIndex == items.length - 1) {
-          final last = items[mostVisibleIndex];
-          if (last is ReaderItemPage &&
-              last.chapter.id == activeChapterId.value) {
-            markChapterAsRead(last.chapter.id);
+        final cursorChapterId = item.owningChapter.id;
+        if (cursorChapterId != activeChapterId.value) {
+          final outgoing = activeChapterId.value;
+          activeChapterId.value = cursorChapterId;
+          currentPageInChapter.value =
+              item is ReaderItemPage ? item.pageIndex : 0;
+          // The chapter the user left should be marked read.
+          markChapterAsRead(outgoing);
+        }
+
+        // Forward pre-fetch: if we're within N items of the end of
+        // the loaded list AND there's a chapter after the last loaded
+        // one in the manga's chapter list, append it.
+        if (mostVisibleIndex >=
+            items.length - _ScrollConfig.preFetchPagesThreshold) {
+          final lastLoadedId = loadedChapterIds.value.last;
+          final next = _findAdjacentChapter(
+            mangaChapterList,
+            lastLoadedId,
+            offset: 1,
+          );
+          if (next != null &&
+              !loadedChapterIds.value.contains(next.id)) {
+            loadedChapterIds.value = [...loadedChapterIds.value, next.id];
           }
         }
 
-        // Schedule a debounced active-chapter switch so quick crossings
-        // don't thrash.
-        if (chapterAtCursor.id != activeChapterId.value) {
-          activeChapterDebounce.value?.cancel();
-          activeChapterDebounce.value =
-              Timer(_ScrollConfig.activeChapterDebounce, () {
-            final outgoing = activeChapterId.value;
-            activeChapterId.value = chapterAtCursor.id;
-            currentPageInChapter.value =
-                item is ReaderItemPage ? item.pageIndex : 0;
-            // When the user crosses forward into a later chapter, the
-            // chapter they left should be considered read.
-            markChapterAsRead(outgoing);
-          });
+        // Backward pre-fetch: if we're within N items of the start of
+        // the loaded list AND there's a chapter before the first loaded
+        // one in the manga's chapter list, prepend it. The
+        // scroll-anchor effect will compensate the scroll position
+        // once those pages stream in.
+        if (mostVisibleIndex < _ScrollConfig.preFetchPagesThreshold) {
+          final firstLoadedId = loadedChapterIds.value.first;
+          final prev = _findAdjacentChapter(
+            mangaChapterList,
+            firstLoadedId,
+            offset: -1,
+          );
+          if (prev != null &&
+              !loadedChapterIds.value.contains(prev.id)) {
+            loadedChapterIds.value = [prev.id, ...loadedChapterIds.value];
+          }
         }
-
-        isUserScrolling.value = true;
-        positionUpdateTimer.value?.cancel();
-        positionUpdateTimer.value =
-            Timer(_ScrollConfig.programmaticNavigationDelay, () {
-          isUserScrolling.value = false;
-          isNavigatingFromSlider.value = false;
-        });
       }
 
       positionsListener.itemPositions.addListener(listener);
-      return () {
-        positionsListener.itemPositions.removeListener(listener);
-      };
-    }, [items, activeChapterId.value]);
+      return () =>
+          positionsListener.itemPositions.removeListener(listener);
+    });
 
-    // Notify the reader_wrapper / slider that the local page changed.
-    // Mirrors the old onPageChanged signal but stays internal — the slider
-    // only ever sees pages of the active chapter.
-    useEffect(() {
-      lastReportedChapterId.value = activeChapterId.value;
-      return null;
-    }, [activeChapterId.value]);
-
-    final bool isAnimationEnabled =
-        ref.read(readerScrollAnimationProvider).ifNull(true);
     final bool isPinchToZoomEnabled =
         ref.read(pinchToZoomProvider).ifNull(true);
 
@@ -242,40 +280,24 @@ class ContinuousReaderMode extends HookConsumerWidget {
       showReaderLayoutAnimation: showReaderLayoutAnimation,
       currentIndex: currentPageInChapter.value,
       onChanged: (pageWithinChapter) {
-        // Slider moved to `pageWithinChapter` within the active chapter.
-        // Translate that into a global items index and jump to it.
-        final activeStart = items.indexWhere(
+        // Slider moved within the active chapter — translate to global
+        // items index and jump.
+        final start = items.indexWhere(
           (item) =>
               item is ReaderItemPage &&
               item.chapter.id == activeChapterId.value &&
               item.pageIndex == 0,
         );
-        if (activeStart < 0) return;
-
-        isNavigatingFromSlider.value = true;
+        if (start < 0) return;
         currentPageInChapter.value = pageWithinChapter;
-        scrollController.jumpTo(index: activeStart + pageWithinChapter);
-        Timer(const Duration(milliseconds: 300), () {
-          isNavigatingFromSlider.value = false;
-        });
+        if (scrollController.isAttached) {
+          scrollController.jumpTo(index: start + pageWithinChapter);
+        }
       },
-      // The reader_wrapper's prev/next arrows in continuous mode page
-      // within the current chapter rather than across — preserving the
-      // existing UX. Cross-chapter movement is the user's own scroll.
-      onPrevious: () => _stepWithinChapter(
-        scrollController,
-        positionsListener,
-        isUserScrolling,
-        isAnimationEnabled,
-        isNext: false,
-      ),
-      onNext: () => _stepWithinChapter(
-        scrollController,
-        positionsListener,
-        isUserScrolling,
-        isAnimationEnabled,
-        isNext: true,
-      ),
+      onPrevious: () =>
+          _stepBy(scrollController, positionsListener, isNext: false),
+      onNext: () =>
+          _stepBy(scrollController, positionsListener, isNext: true),
       child: AppUtils.wrapOn(
         !kIsWeb &&
                 (Platform.isAndroid || Platform.isIOS) &&
@@ -304,6 +326,22 @@ class ContinuousReaderMode extends HookConsumerWidget {
         ),
       ),
     );
+  }
+
+  /// Returns the chapter `offset` positions away from the chapter with
+  /// id `relativeTo` in the manga's reading-order chapter list. Returns
+  /// null if it would fall off either end.
+  static ChapterDto? _findAdjacentChapter(
+    List<ChapterDto>? chapters,
+    int relativeTo, {
+    required int offset,
+  }) {
+    if (chapters == null) return null;
+    final i = chapters.indexWhere((c) => c.id == relativeTo);
+    if (i == -1) return null;
+    final target = i + offset;
+    if (target < 0 || target >= chapters.length) return null;
+    return chapters[target];
   }
 
   static int _initialScrollIndex(
@@ -351,9 +389,6 @@ class ContinuousReaderMode extends HookConsumerWidget {
       child: ChapterSeparator(
         manga: manga,
         chapter: item.endingChapter,
-        // The existing ChapterSeparator widget uses this flag to decide
-        // whether to show "Previous chapter" vs "Next chapter" affordances.
-        // At an inline seam we're always pointing forward.
         isPreviousChapterSeparator: false,
       ),
     );
@@ -378,49 +413,19 @@ class ContinuousReaderMode extends HookConsumerWidget {
     return (trailing - leading).clamp(0.0, 1.0);
   }
 
-  /// Tap-zone / hardware-button stepping. Moves by one item within the
-  /// scrollable, which in this multi-chapter list happens to cross chapter
-  /// boundaries naturally without extra logic.
-  static void _stepWithinChapter(
+  /// Tap-zone / hardware-button stepping. Moves by one item in the
+  /// scrollable, which spans chapters in this multi-chapter list.
+  static void _stepBy(
     ItemScrollController scrollController,
-    ItemPositionsListener positionsListener,
-    ValueNotifier<bool> isUserScrolling,
-    bool isAnimationEnabled, {
+    ItemPositionsListener positionsListener, {
     required bool isNext,
   }) {
-    if (isUserScrolling.value) return;
-
     final positions = positionsListener.itemPositions.value.toList();
     if (positions.isEmpty) return;
-
-    ItemPosition? current;
-    for (final p in positions) {
-      if (_visibleArea(p) > _ScrollConfig.minVisibleAreaThreshold) {
-        current = p;
-        break;
-      }
-    }
-    if (current == null) return;
-
-    final int target;
-    if (isNext) {
-      target = current.itemTrailingEdge > 0.8
-          ? current.index + 1
-          : current.index;
-    } else {
-      target = current.itemLeadingEdge < 0.2
-          ? (current.index - 1).clamp(0, 1 << 30)
-          : current.index;
-    }
-
-    if (isAnimationEnabled) {
-      scrollController.scrollTo(
-        index: target,
-        duration: const Duration(milliseconds: 200),
-        curve: Curves.easeOut,
-        alignment: 0,
-      );
-    } else {
+    final mostVisible = _mostVisibleIndex(positions);
+    if (mostVisible == null) return;
+    final target = isNext ? mostVisible + 1 : (mostVisible - 1).clamp(0, 1 << 30);
+    if (scrollController.isAttached) {
       scrollController.jumpTo(index: target, alignment: 0);
     }
   }

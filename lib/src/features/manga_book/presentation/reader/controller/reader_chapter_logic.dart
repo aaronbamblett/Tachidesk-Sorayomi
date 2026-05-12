@@ -75,6 +75,22 @@ List<int> orderChapterIdsForReading(List<ChapterOrderInfo> chapters) {
 /// (earlier pages, previous chapter). `neutral` is idle / stationary.
 enum ScrollDirection { up, down, neutral }
 
+/// Whether pre-fetch is currently allowed, given the cooldown window.
+///
+/// After a pre-fetch fires, the items list grows and the
+/// scroll-anchor `jumpTo` runs in a post-frame callback. Between those
+/// two events the position listener can fire several times with
+/// `mostVisibleIndex` still near the boundary, which without a cooldown
+/// re-triggers the same pre-fetch and cascades. This gate enforces a
+/// minimum interval between fires.
+bool canPrefetch({
+  required DateTime now,
+  required DateTime? cooldownUntil,
+}) {
+  if (cooldownUntil == null) return true;
+  return !now.isBefore(cooldownUntil);
+}
+
 /// Whether the reader should pre-fetch the NEXT chapter from the
 /// current state.
 ///

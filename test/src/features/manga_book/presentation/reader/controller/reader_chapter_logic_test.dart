@@ -267,6 +267,34 @@ void main() {
     });
   });
 
+  group('canPrefetch', () {
+    test('returns true when no cooldown is set', () {
+      expect(
+        canPrefetch(now: DateTime(2026, 1, 1), cooldownUntil: null),
+        isTrue,
+      );
+    });
+
+    test('returns false during the cooldown window', () {
+      final now = DateTime(2026, 1, 1, 12, 0, 0);
+      final cooldownUntil = now.add(const Duration(milliseconds: 500));
+      expect(canPrefetch(now: now, cooldownUntil: cooldownUntil), isFalse);
+    });
+
+    test('returns true exactly at the cooldown expiry', () {
+      // The lock releases at the instant the cooldown ends — `now` is not
+      // before `cooldownUntil`, so pre-fetch is allowed.
+      final t = DateTime(2026, 1, 1, 12, 0, 0);
+      expect(canPrefetch(now: t, cooldownUntil: t), isTrue);
+    });
+
+    test('returns true after the cooldown window', () {
+      final now = DateTime(2026, 1, 1, 12, 0, 0);
+      final cooldownUntil = now.subtract(const Duration(milliseconds: 100));
+      expect(canPrefetch(now: now, cooldownUntil: cooldownUntil), isTrue);
+    });
+  });
+
   group('orderChapterIdsForReading', () {
     test('returns ids in chapter-number ascending order regardless of input',
         () {

@@ -38,6 +38,11 @@ class _Config {
   /// Dwell time before committing an active-chapter change (see continuous
   /// reader for the same guard against single-frame transient flips).
   static const Duration activeChapterDwellTime = Duration(milliseconds: 500);
+
+  /// Cooldown between successive pre-fetch fires; prevents the rebuild +
+  /// scroll-anchor jumpTo race from re-triggering pre-fetch repeatedly.
+  /// Same idea as continuous reader.
+  static const Duration prefetchCooldown = Duration(milliseconds: 800);
 }
 
 class SinglePageReaderMode extends HookConsumerWidget {
@@ -90,6 +95,10 @@ class SinglePageReaderMode extends HookConsumerWidget {
     // `scrollDirection: Axis` constructor parameter.)
     final scrollDirectionRef =
         useRef<ScrollDirection>(ScrollDirection.neutral);
+
+    // Cooldown timestamp; pre-fetch is rate-limited to avoid re-firing
+    // during the rebuild + scroll-anchor jumpTo gap.
+    final prefetchCooldownUntil = useRef<DateTime?>(null);
 
     Future<void> markChapterAsRead(int chapterId) async {
       if (markedAsRead.value.contains(chapterId)) return;
@@ -258,13 +267,20 @@ class SinglePageReaderMode extends HookConsumerWidget {
 
         // Pre-fetch decisions gated on scroll direction; see continuous
         // reader for the full rationale (the page-zero-then-scroll-forward
-        // cascade that was eating chapters).
-        if (shouldPrefetchForward(
-          mostVisibleIndex: pageIndex,
-          itemsLength: items.length,
-          threshold: _Config.preFetchThreshold,
-          direction: scrollDirectionRef.value,
-        )) {
+        // cascade that was eating chapters). Cooldown gates re-fire
+        // during the rebuild + scroll-anchor jumpTo gap.
+        final canFire = canPrefetch(
+          now: DateTime.now(),
+          cooldownUntil: prefetchCooldownUntil.value,
+        );
+
+        if (canFire &&
+            shouldPrefetchForward(
+              mostVisibleIndex: pageIndex,
+              itemsLength: items.length,
+              threshold: _Config.preFetchThreshold,
+              direction: scrollDirectionRef.value,
+            )) {
           final lastLoadedId = loadedChapterIds.value.last;
           final nextId = findAdjacentChapterId(
             orderInfo,
@@ -274,14 +290,17 @@ class SinglePageReaderMode extends HookConsumerWidget {
           if (nextId != null &&
               !loadedChapterIds.value.contains(nextId)) {
             loadedChapterIds.value = [...loadedChapterIds.value, nextId];
+            prefetchCooldownUntil.value =
+                DateTime.now().add(_Config.prefetchCooldown);
           }
         }
 
-        if (shouldPrefetchBackward(
-          mostVisibleIndex: pageIndex,
-          threshold: _Config.preFetchThreshold,
-          direction: scrollDirectionRef.value,
-        )) {
+        if (canFire &&
+            shouldPrefetchBackward(
+              mostVisibleIndex: pageIndex,
+              threshold: _Config.preFetchThreshold,
+              direction: scrollDirectionRef.value,
+            )) {
           final firstLoadedId = loadedChapterIds.value.first;
           final prevId = findAdjacentChapterId(
             orderInfo,
@@ -291,6 +310,8 @@ class SinglePageReaderMode extends HookConsumerWidget {
           if (prevId != null &&
               !loadedChapterIds.value.contains(prevId)) {
             loadedChapterIds.value = [prevId, ...loadedChapterIds.value];
+            prefetchCooldownUntil.value =
+                DateTime.now().add(_Config.prefetchCooldown);
           }
         }
       }

@@ -46,6 +46,14 @@ class _ScrollConfig {
   /// when the items list rebuilds (which would otherwise mark the old
   /// active chapter as read prematurely).
   static const Duration activeChapterDwellTime = Duration(milliseconds: 500);
+
+  /// Cooldown between successive pre-fetch fires. After a pre-fetch,
+  /// the items list grows and the scroll-anchor jumpTo runs in a
+  /// post-frame callback; the position listener can fire several times
+  /// between those events with `mostVisibleIndex` still near the
+  /// boundary. Without this cooldown the gate keeps re-firing and the
+  /// user cascades through chapters.
+  static const Duration prefetchCooldown = Duration(milliseconds: 800);
 }
 
 class ContinuousReaderMode extends HookConsumerWidget {
@@ -116,6 +124,10 @@ class ContinuousReaderMode extends HookConsumerWidget {
     // `scrollDirection: Axis` constructor parameter.)
     final scrollDirectionRef =
         useRef<ScrollDirection>(ScrollDirection.neutral);
+
+    // Cooldown timestamp; pre-fetch is rate-limited to avoid the
+    // re-fire cascade during the rebuild + scroll-anchor jumpTo gap.
+    final prefetchCooldownUntil = useRef<DateTime?>(null);
 
     Future<void> markChapterAsRead(int chapterId) async {
       if (markedAsRead.value.contains(chapterId)) return;
@@ -306,12 +318,18 @@ class ContinuousReaderMode extends HookConsumerWidget {
         // exclusive, which prevents the scroll-forward-from-page-0 case
         // (mostVisibleIndex stays in [0..threshold) for a while) from
         // triggering backward pre-fetch.
-        if (shouldPrefetchForward(
-          mostVisibleIndex: mostVisibleIndex,
-          itemsLength: items.length,
-          threshold: _ScrollConfig.preFetchPagesThreshold,
-          direction: scrollDirectionRef.value,
-        )) {
+        final canFire = canPrefetch(
+          now: DateTime.now(),
+          cooldownUntil: prefetchCooldownUntil.value,
+        );
+
+        if (canFire &&
+            shouldPrefetchForward(
+              mostVisibleIndex: mostVisibleIndex,
+              itemsLength: items.length,
+              threshold: _ScrollConfig.preFetchPagesThreshold,
+              direction: scrollDirectionRef.value,
+            )) {
           final lastLoadedId = loadedChapterIds.value.last;
           final nextId = findAdjacentChapterId(
             orderInfo,
@@ -321,14 +339,17 @@ class ContinuousReaderMode extends HookConsumerWidget {
           if (nextId != null &&
               !loadedChapterIds.value.contains(nextId)) {
             loadedChapterIds.value = [...loadedChapterIds.value, nextId];
+            prefetchCooldownUntil.value =
+                DateTime.now().add(_ScrollConfig.prefetchCooldown);
           }
         }
 
-        if (shouldPrefetchBackward(
-          mostVisibleIndex: mostVisibleIndex,
-          threshold: _ScrollConfig.preFetchPagesThreshold,
-          direction: scrollDirectionRef.value,
-        )) {
+        if (canFire &&
+            shouldPrefetchBackward(
+              mostVisibleIndex: mostVisibleIndex,
+              threshold: _ScrollConfig.preFetchPagesThreshold,
+              direction: scrollDirectionRef.value,
+            )) {
           final firstLoadedId = loadedChapterIds.value.first;
           final prevId = findAdjacentChapterId(
             orderInfo,
@@ -338,6 +359,8 @@ class ContinuousReaderMode extends HookConsumerWidget {
           if (prevId != null &&
               !loadedChapterIds.value.contains(prevId)) {
             loadedChapterIds.value = [prevId, ...loadedChapterIds.value];
+            prefetchCooldownUntil.value =
+                DateTime.now().add(_ScrollConfig.prefetchCooldown);
           }
         }
       }

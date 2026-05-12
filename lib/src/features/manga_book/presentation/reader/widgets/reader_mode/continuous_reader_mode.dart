@@ -10,6 +10,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
+import 'package:gap/gap.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 
@@ -429,7 +430,7 @@ class ContinuousReaderMode extends HookConsumerWidget {
                 isPinchToZoomEnabled
             ? (Widget child) => InteractiveViewer(maxScale: 5, child: child)
             : null,
-        ScrollablePositionedList.builder(
+        ScrollablePositionedList.separated(
           itemScrollController: scrollController,
           itemPositionsListener: positionsListener,
           initialScrollIndex: _initialScrollIndex(items, activeChapter),
@@ -439,6 +440,12 @@ class ContinuousReaderMode extends HookConsumerWidget {
           minCacheExtent: scrollDirection == Axis.vertical
               ? context.height * 2
               : context.width * 2,
+          // In `continuousVertical` reader mode Sorayomi inserts a gap
+          // between every page, distinguishing it from the seamless
+          // `webtoon` mode where pages butt together. Honour the
+          // showSeparator flag the screen passes in.
+          separatorBuilder: (context, index) =>
+              showSeparator ? const Gap(16) : const SizedBox.shrink(),
           itemBuilder: (context, index) {
             final item = items[index];
             switch (item) {

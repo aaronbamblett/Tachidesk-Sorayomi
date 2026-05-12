@@ -9,7 +9,6 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 
 import '../../../../../constants/enum.dart';
 import '../../../../../routes/router_config.dart';
-import '../../../../../widgets/zoom/reader_gesture_diagnostics.dart';
 import '../../../../../widgets/zoom/single_touch_drag_recognizers.dart';
 import '../../../domain/chapter/chapter_model.dart';
 import '../../../domain/chapter_page/chapter_page_model.dart';
@@ -76,7 +75,6 @@ class DirectionalSwipeGestureHandler extends HookWidget {
           () => SingleTouchPanGestureRecognizer(debugOwner: this),
           (recognizer) {
             recognizer.onEnd = (details) {
-              ReaderGestureDiagnostics.instance.bumpOuterPanEnd();
               final swipeDirection =
                   LastPageSwipeUtils.detectSwipeDirection(details);
               if (swipeDirection != null) {
@@ -113,7 +111,6 @@ class DirectionalSwipeGestureHandler extends HookWidget {
           () => SingleTouchHorizontalDragGestureRecognizer(debugOwner: this),
           (recognizer) {
             recognizer.onEnd = (details) {
-              ReaderGestureDiagnostics.instance.bumpOuterPanEnd();
               _handleSwipeGesture(
                 context: context,
                 details: details,
@@ -128,7 +125,6 @@ class DirectionalSwipeGestureHandler extends HookWidget {
           () => SingleTouchVerticalDragGestureRecognizer(debugOwner: this),
           (recognizer) {
             recognizer.onEnd = (details) {
-              ReaderGestureDiagnostics.instance.bumpOuterPanEnd();
               _handleSwipeGesture(
                 context: context,
                 details: details,

@@ -18,7 +18,6 @@ import 'package:zoom_view/zoom_view.dart';
 import '../../../../../../utils/extensions/custom_extensions.dart';
 import '../../../../../../utils/misc/app_utils.dart';
 import '../../../../../../widgets/server_image.dart';
-import '../../../../../../widgets/zoom/reader_gesture_diagnostics.dart';
 import '../../../../../../widgets/zoom/scroll_offset_to_scroll_controller.dart';
 import '../../../../../settings/presentation/reader/widgets/reader_pinch_to_zoom/reader_pinch_to_zoom.dart';
 import '../../../../../settings/presentation/reader/widgets/reader_scroll_animation_tile/reader_scroll_animation_tile.dart';
@@ -195,21 +194,16 @@ class ContinuousReaderMode extends HookConsumerWidget {
         !kIsWeb &&
                 (Platform.isAndroid || Platform.isIOS) &&
                 isPinchToZoomEnabled
-            ? (Widget child) => Listener(
-                  behavior: HitTestBehavior.translucent,
-                  onPointerDown: (_) =>
-                      ReaderGestureDiagnostics.instance.bumpPointerDown(),
-                  child: ZoomView(
-                    controller: zoomScrollController,
-                    scrollAxis: scrollDirection,
-                    maxScale: 5,
-                    doubleTapDrag: true,
-                    forceHoldOnPointerDown: true,
-                    onScaleChanged: (s) => ReaderGestureDiagnostics
-                        .instance
-                        .bumpScaleEvent(s),
-                    child: child,
-                  ),
+            ? (Widget child) => ZoomView(
+                  controller: zoomScrollController,
+                  scrollAxis: scrollDirection,
+                  maxScale: 5,
+                  doubleTapDrag: true,
+                  // Required so the scale recognizer wins the gesture
+                  // arena against the underlying scrollable's drag
+                  // recognizer (closes #256).
+                  forceHoldOnPointerDown: true,
+                  child: child,
                 )
             : null,
         ScrollablePositionedList.separated(

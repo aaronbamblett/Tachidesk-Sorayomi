@@ -19,7 +19,6 @@ import '../../../../../../utils/extensions/custom_extensions.dart';
 import '../../../../../../utils/misc/app_utils.dart';
 import '../../../../../../widgets/custom_circular_progress_indicator.dart';
 import '../../../../../../widgets/server_image.dart';
-import '../../../../../../widgets/zoom/reader_gesture_diagnostics.dart';
 import '../../../../../settings/presentation/reader/widgets/reader_scroll_animation_tile/reader_scroll_animation_tile.dart';
 import '../../../../domain/chapter/chapter_model.dart';
 import '../../../../domain/chapter_page/chapter_page_model.dart';
@@ -114,21 +113,16 @@ class SinglePageReaderMode extends HookConsumerWidget {
       pageController: scrollController,
       child: AppUtils.wrapOn(
         !kIsWeb && (Platform.isAndroid || Platform.isIOS)
-            ? (Widget child) => Listener(
-                  behavior: HitTestBehavior.translucent,
-                  onPointerDown: (_) =>
-                      ReaderGestureDiagnostics.instance.bumpPointerDown(),
-                  child: ZoomView(
-                    controller: scrollController,
-                    scrollAxis: scrollDirection,
-                    maxScale: 5,
-                    doubleTapDrag: true,
-                    forceHoldOnPointerDown: true,
-                    onScaleChanged: (s) => ReaderGestureDiagnostics
-                        .instance
-                        .bumpScaleEvent(s),
-                    child: child,
-                  ),
+            ? (Widget child) => ZoomView(
+                  controller: scrollController,
+                  scrollAxis: scrollDirection,
+                  maxScale: 5,
+                  doubleTapDrag: true,
+                  // Required so the scale recognizer wins the gesture
+                  // arena against the underlying PageView's pan
+                  // recognizer (closes #256).
+                  forceHoldOnPointerDown: true,
+                  child: child,
                 )
             : null,
         PageView.builder(

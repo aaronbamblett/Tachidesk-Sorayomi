@@ -92,10 +92,16 @@ class ContinuousReaderMode extends HookConsumerWidget {
     // Mark-as-read dedupe across the reader session.
     final markedAsRead = useRef<Set<int>>(<int>{});
 
+    // Debounced save of mid-chapter progress for the active chapter,
+    // mirroring the old reader_screen.onPageChanged behaviour: write
+    // `lastPageRead` for the active chapter when the user pauses on a
+    // page for ~2 seconds, never regressing existing progress.
+    final progressSaveDebounce = useRef<Timer?>(null);
+
     Future<void> markChapterAsRead(int chapterId) async {
       if (markedAsRead.value.contains(chapterId)) return;
       markedAsRead.value = {...markedAsRead.value, chapterId};
-      await AsyncValue.guard(
+      final result = await AsyncValue.guard(
         () => ref.read(mangaBookRepositoryProvider).putChapter(
               chapterId: chapterId,
               patch: ChapterChange(
@@ -104,6 +110,18 @@ class ContinuousReaderMode extends HookConsumerWidget {
               ),
             ),
       );
+      if (result.hasError) {
+        // The mutation failed — let it be retried next time the user
+        // crosses or reaches the last page of this chapter by clearing
+        // it from the dedupe set.
+        final next = {...markedAsRead.value}..remove(chapterId);
+        markedAsRead.value = next;
+        return;
+      }
+      // Refresh local caches so the manga details / chapter list / history
+      // immediately reflect the new read state.
+      ref.invalidate(chapterProvider(chapterId: chapterId));
+      ref.invalidate(mangaChapterListProvider(mangaId: manga.id));
     }
 
     // Build the items list locally from the set of loaded chapters. The
@@ -264,6 +282,38 @@ class ContinuousReaderMode extends HookConsumerWidget {
       return () =>
           positionsListener.itemPositions.removeListener(listener);
     });
+
+    // Schedule a debounced save of `lastPageRead` for the active chapter
+    // whenever the local page index moves. Mirrors the prior screen-level
+    // behaviour but with the multi-chapter context the reader now owns.
+    useEffect(() {
+      progressSaveDebounce.value?.cancel();
+      final chapterId = activeChapterId.value;
+      final pageIndex = currentPageInChapter.value;
+      final chapterSnapshot = loadedChapters[chapterId];
+
+      progressSaveDebounce.value =
+          Timer(const Duration(seconds: 2), () async {
+        if (chapterSnapshot == null) return;
+        if (chapterSnapshot.isRead.ifNull()) return;
+        if (markedAsRead.value.contains(chapterId)) return;
+        // Don't regress saved progress.
+        final saved =
+            chapterSnapshot.lastPageRead.getValueOnNullOrNegative();
+        if (pageIndex <= saved) return;
+        await AsyncValue.guard(
+          () => ref.read(mangaBookRepositoryProvider).putChapter(
+                chapterId: chapterId,
+                patch: ChapterChange(lastPageRead: pageIndex),
+              ),
+        );
+      });
+      return null;
+    }, [currentPageInChapter.value, activeChapterId.value]);
+
+    useEffect(() {
+      return () => progressSaveDebounce.value?.cancel();
+    }, const []);
 
     final bool isPinchToZoomEnabled =
         ref.read(pinchToZoomProvider).ifNull(true);

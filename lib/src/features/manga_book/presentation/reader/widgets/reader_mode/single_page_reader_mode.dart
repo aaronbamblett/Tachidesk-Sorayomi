@@ -4,6 +4,7 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
@@ -72,15 +73,25 @@ class SinglePageReaderMode extends HookConsumerWidget {
 
     final markedAsRead = useRef<Set<int>>(<int>{});
 
+    // Debounced save of mid-chapter progress for the active chapter.
+    final progressSaveDebounce = useRef<Timer?>(null);
+
     Future<void> markChapterAsRead(int chapterId) async {
       if (markedAsRead.value.contains(chapterId)) return;
       markedAsRead.value = {...markedAsRead.value, chapterId};
-      await AsyncValue.guard(
+      final result = await AsyncValue.guard(
         () => ref.read(mangaBookRepositoryProvider).putChapter(
               chapterId: chapterId,
               patch: ChapterChange(lastPageRead: 0, isRead: true),
             ),
       );
+      if (result.hasError) {
+        final next = {...markedAsRead.value}..remove(chapterId);
+        markedAsRead.value = next;
+        return;
+      }
+      ref.invalidate(chapterProvider(chapterId: chapterId));
+      ref.invalidate(mangaChapterListProvider(mangaId: manga.id));
     }
 
     // Build items list locally from loaded chapters.
@@ -229,6 +240,36 @@ class SinglePageReaderMode extends HookConsumerWidget {
       pageController.addListener(listener);
       return () => pageController.removeListener(listener);
     });
+
+    // Debounced save of in-progress reading position for the active
+    // chapter. Mirrors the prior reader_screen.onPageChanged behaviour.
+    useEffect(() {
+      progressSaveDebounce.value?.cancel();
+      final chapterId = activeChapterId.value;
+      final pageIndex = currentPageInChapter.value;
+      final chapterSnapshot = loadedChapters[chapterId];
+
+      progressSaveDebounce.value =
+          Timer(const Duration(seconds: 2), () async {
+        if (chapterSnapshot == null) return;
+        if (chapterSnapshot.isRead.ifNull()) return;
+        if (markedAsRead.value.contains(chapterId)) return;
+        final saved =
+            chapterSnapshot.lastPageRead.getValueOnNullOrNegative();
+        if (pageIndex <= saved) return;
+        await AsyncValue.guard(
+          () => ref.read(mangaBookRepositoryProvider).putChapter(
+                chapterId: chapterId,
+                patch: ChapterChange(lastPageRead: pageIndex),
+              ),
+        );
+      });
+      return null;
+    }, [currentPageInChapter.value, activeChapterId.value]);
+
+    useEffect(() {
+      return () => progressSaveDebounce.value?.cancel();
+    }, const []);
 
     // Eager prefetch of adjacent pages WITHIN the active chapter (the
     // existing single-page behaviour). Cross-chapter prefetch is handled

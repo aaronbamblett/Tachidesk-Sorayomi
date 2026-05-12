@@ -118,6 +118,9 @@ class SinglePageReaderMode extends HookConsumerWidget {
                   scrollAxis: scrollDirection,
                   maxScale: 5,
                   doubleTapDrag: true,
+                  // Required so the scale recognizer wins the gesture
+                  // arena against the underlying PageView's pan recognizer.
+                  forceHoldOnPointerDown: true,
                   child: child,
                 )
             : null,

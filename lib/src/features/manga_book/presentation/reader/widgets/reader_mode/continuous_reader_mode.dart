@@ -199,6 +199,12 @@ class ContinuousReaderMode extends HookConsumerWidget {
                   scrollAxis: scrollDirection,
                   maxScale: 5,
                   doubleTapDrag: true,
+                  // Required when the child is a ScrollablePositionedList:
+                  // its inner drag recognizer would otherwise win the
+                  // gesture arena over ZoomView's scale recognizer, so
+                  // pinches never register. Holding the scroll position
+                  // on pointer-down lets the scale recognizer win.
+                  forceHoldOnPointerDown: true,
                   child: child,
                 )
             : null,

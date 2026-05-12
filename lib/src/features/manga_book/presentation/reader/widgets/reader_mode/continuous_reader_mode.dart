@@ -472,7 +472,7 @@ class ContinuousReaderMode extends HookConsumerWidget {
   }
 
   Widget _buildPage(BuildContext context, ReaderItemPage item) {
-    return ServerImage(
+    final Widget image = ServerImage(
       showReloadButton: true,
       fit: scrollDirection == Axis.vertical
           ? BoxFit.fitWidth
@@ -489,6 +489,19 @@ class ContinuousReaderMode extends HookConsumerWidget {
             scrollDirection != Axis.vertical ? context.width * .7 : null,
         child: child,
       ),
+    );
+    if (!showSeparator) return image;
+    // In `continuousVertical` mode (showSeparator: true) Sorayomi wants a
+    // gap between pages, distinguishing it from the seamless `webtoon`
+    // mode. The gap is applied here as padding on each page widget,
+    // intentionally NOT via `ScrollablePositionedList.separated` —
+    // .separated's separator slots interact badly with the
+    // ItemPositionsListener-driven active-chapter detection.
+    return Padding(
+      padding: scrollDirection == Axis.vertical
+          ? const EdgeInsets.only(bottom: 16)
+          : const EdgeInsets.only(right: 16),
+      child: image,
     );
   }
 

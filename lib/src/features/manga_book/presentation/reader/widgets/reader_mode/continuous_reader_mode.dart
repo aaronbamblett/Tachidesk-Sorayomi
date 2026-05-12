@@ -22,6 +22,7 @@ import '../../../../domain/chapter/chapter_model.dart';
 import '../../../../domain/chapter_batch/chapter_batch_model.dart';
 import '../../../../domain/manga/manga_model.dart';
 import '../../../manga_details/controller/manga_details_controller.dart';
+import '../../controller/reader_chapter_logic.dart';
 import '../../controller/reader_controller.dart';
 import '../../controller/reader_item.dart';
 import '../chapter_separator.dart';
@@ -39,6 +40,12 @@ class _ScrollConfig {
   /// item is within this many positions of the start or end of the loaded
   /// items list.
   static const int preFetchPagesThreshold = 5;
+
+  /// Don't commit an active-chapter change until the cursor has stayed in
+  /// the new chapter for this long. Guards against a single-frame flip
+  /// when the items list rebuilds (which would otherwise mark the old
+  /// active chapter as read prematurely).
+  static const Duration activeChapterDwellTime = Duration(milliseconds: 500);
 }
 
 class ContinuousReaderMode extends HookConsumerWidget {
@@ -97,6 +104,17 @@ class ContinuousReaderMode extends HookConsumerWidget {
     // `lastPageRead` for the active chapter when the user pauses on a
     // page for ~2 seconds, never regressing existing progress.
     final progressSaveDebounce = useRef<Timer?>(null);
+
+    // Dwell-time debounce on active-chapter changes (see _ScrollConfig).
+    final activeChapterDwellTimer = useRef<Timer?>(null);
+
+    // Tracks whether the user has actually moved from their initial scroll
+    // position. Until they do, the position listener's first fires report
+    // indices from the top of the viewport (BEFORE the initial scroll-to
+    // jump has resolved) which would otherwise trigger spurious backward
+    // pre-fetch of the wrong chapter.
+    final initialMostVisible = useRef<int?>(null);
+    final userHasScrolled = useRef<bool>(false);
 
     Future<void> markChapterAsRead(int chapterId) async {
       if (markedAsRead.value.contains(chapterId)) return;
@@ -232,48 +250,102 @@ class ContinuousReaderMode extends HookConsumerWidget {
           }
         }
 
+        // Track whether the user has actually moved from their initial
+        // scroll position. Position listener fires on initial layout
+        // with stale-looking positions before the initial scroll-to
+        // jump resolves — those fires must NOT trigger pre-fetch.
+        if (initialMostVisible.value == null) {
+          initialMostVisible.value = mostVisibleIndex;
+        } else if (mostVisibleIndex != initialMostVisible.value) {
+          userHasScrolled.value = true;
+        }
+
         final cursorChapterId = item.owningChapter.id;
         if (cursorChapterId != activeChapterId.value) {
-          final outgoing = activeChapterId.value;
-          activeChapterId.value = cursorChapterId;
-          currentPageInChapter.value =
-              item is ReaderItemPage ? item.pageIndex : 0;
-          // The chapter the user left should be marked read.
-          markChapterAsRead(outgoing);
+          // Schedule the active-chapter flip after a dwell time. If the
+          // cursor moves back into the original chapter (e.g. because
+          // the scroll-anchor effect just compensated a list-grow) the
+          // timer is cancelled and no mark-as-read happens.
+          activeChapterDwellTimer.value?.cancel();
+          activeChapterDwellTimer.value =
+              Timer(_ScrollConfig.activeChapterDwellTime, () {
+            final livePositions =
+                positionsListener.itemPositions.value.toList();
+            if (livePositions.isEmpty || items.isEmpty) return;
+            final liveMostVisible = _mostVisibleIndex(livePositions);
+            if (liveMostVisible == null ||
+                liveMostVisible < 0 ||
+                liveMostVisible >= items.length) {
+              return;
+            }
+            final liveItem = items[liveMostVisible];
+            if (liveItem.owningChapter.id != cursorChapterId) return;
+            if (cursorChapterId == activeChapterId.value) return;
+
+            final outgoing = activeChapterId.value;
+            activeChapterId.value = cursorChapterId;
+            currentPageInChapter.value =
+                liveItem is ReaderItemPage ? liveItem.pageIndex : 0;
+            markChapterAsRead(outgoing);
+          });
+        } else {
+          // Cursor returned to the active chapter before the dwell timer
+          // fired — abort the pending flip.
+          activeChapterDwellTimer.value?.cancel();
         }
+
+        // Pre-fetch is only ever triggered by deliberate user scrolling,
+        // not by the initial layout. Without this guard the first
+        // position-listener fires (which report items 0..N before the
+        // initial scroll-to-lastPageRead jump completes) would trigger
+        // backward pre-fetch and prepend the wrong chapter to the list.
+        if (!userHasScrolled.value) return;
+
+        // Convert the chapter list to the minimal info the adjacency
+        // helper needs. The helper sorts by chapterNumber explicitly so
+        // we get correct reading-order navigation regardless of how the
+        // server returns chapters.
+        final orderInfo = mangaChapterList == null
+            ? const <ChapterOrderInfo>[]
+            : [
+                for (final c in mangaChapterList)
+                  ChapterOrderInfo(
+                    id: c.id,
+                    chapterNumber: c.chapterNumber,
+                  ),
+              ];
 
         // Forward pre-fetch: if we're within N items of the end of
         // the loaded list AND there's a chapter after the last loaded
-        // one in the manga's chapter list, append it.
+        // one in reading order, append it.
         if (mostVisibleIndex >=
             items.length - _ScrollConfig.preFetchPagesThreshold) {
           final lastLoadedId = loadedChapterIds.value.last;
-          final next = _findAdjacentChapter(
-            mangaChapterList,
+          final nextId = findAdjacentChapterId(
+            orderInfo,
             lastLoadedId,
             offset: 1,
           );
-          if (next != null &&
-              !loadedChapterIds.value.contains(next.id)) {
-            loadedChapterIds.value = [...loadedChapterIds.value, next.id];
+          if (nextId != null &&
+              !loadedChapterIds.value.contains(nextId)) {
+            loadedChapterIds.value = [...loadedChapterIds.value, nextId];
           }
         }
 
         // Backward pre-fetch: if we're within N items of the start of
         // the loaded list AND there's a chapter before the first loaded
-        // one in the manga's chapter list, prepend it. The
-        // scroll-anchor effect will compensate the scroll position
-        // once those pages stream in.
+        // one in reading order, prepend it. The scroll-anchor effect
+        // compensates the scroll position once those pages stream in.
         if (mostVisibleIndex < _ScrollConfig.preFetchPagesThreshold) {
           final firstLoadedId = loadedChapterIds.value.first;
-          final prev = _findAdjacentChapter(
-            mangaChapterList,
+          final prevId = findAdjacentChapterId(
+            orderInfo,
             firstLoadedId,
             offset: -1,
           );
-          if (prev != null &&
-              !loadedChapterIds.value.contains(prev.id)) {
-            loadedChapterIds.value = [prev.id, ...loadedChapterIds.value];
+          if (prevId != null &&
+              !loadedChapterIds.value.contains(prevId)) {
+            loadedChapterIds.value = [prevId, ...loadedChapterIds.value];
           }
         }
       }
@@ -312,7 +384,10 @@ class ContinuousReaderMode extends HookConsumerWidget {
     }, [currentPageInChapter.value, activeChapterId.value]);
 
     useEffect(() {
-      return () => progressSaveDebounce.value?.cancel();
+      return () {
+        progressSaveDebounce.value?.cancel();
+        activeChapterDwellTimer.value?.cancel();
+      };
     }, const []);
 
     final bool isPinchToZoomEnabled =
@@ -376,22 +451,6 @@ class ContinuousReaderMode extends HookConsumerWidget {
         ),
       ),
     );
-  }
-
-  /// Returns the chapter `offset` positions away from the chapter with
-  /// id `relativeTo` in the manga's reading-order chapter list. Returns
-  /// null if it would fall off either end.
-  static ChapterDto? _findAdjacentChapter(
-    List<ChapterDto>? chapters,
-    int relativeTo, {
-    required int offset,
-  }) {
-    if (chapters == null) return null;
-    final i = chapters.indexWhere((c) => c.id == relativeTo);
-    if (i == -1) return null;
-    final target = i + offset;
-    if (target < 0 || target >= chapters.length) return null;
-    return chapters[target];
   }
 
   static int _initialScrollIndex(

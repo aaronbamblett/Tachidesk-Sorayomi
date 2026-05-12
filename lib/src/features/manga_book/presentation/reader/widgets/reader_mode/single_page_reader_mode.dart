@@ -25,6 +25,7 @@ import '../../../../domain/chapter/chapter_model.dart';
 import '../../../../domain/chapter_batch/chapter_batch_model.dart';
 import '../../../../domain/manga/manga_model.dart';
 import '../../../manga_details/controller/manga_details_controller.dart';
+import '../../controller/reader_chapter_logic.dart';
 import '../../controller/reader_controller.dart';
 import '../../controller/reader_item.dart';
 import '../chapter_separator.dart';
@@ -33,6 +34,10 @@ import '../reader_wrapper.dart';
 class _Config {
   const _Config._();
   static const int preFetchThreshold = 3;
+
+  /// Dwell time before committing an active-chapter change (see continuous
+  /// reader for the same guard against single-frame transient flips).
+  static const Duration activeChapterDwellTime = Duration(milliseconds: 500);
 }
 
 class SinglePageReaderMode extends HookConsumerWidget {
@@ -75,6 +80,13 @@ class SinglePageReaderMode extends HookConsumerWidget {
 
     // Debounced save of mid-chapter progress for the active chapter.
     final progressSaveDebounce = useRef<Timer?>(null);
+
+    // Dwell-time debounce on active-chapter changes (see _Config).
+    final activeChapterDwellTimer = useRef<Timer?>(null);
+
+    // Tracks whether the user has actually moved from their initial page.
+    final initialPageSeen = useRef<int?>(null);
+    final userHasScrolled = useRef<bool>(false);
 
     Future<void> markChapterAsRead(int chapterId) async {
       if (markedAsRead.value.contains(chapterId)) return;
@@ -201,38 +213,83 @@ class SinglePageReaderMode extends HookConsumerWidget {
           }
         }
 
+        // Track whether the user has actually moved from their initial
+        // page — guards initial-render position-listener fires from
+        // triggering pre-fetch of the wrong chapter.
+        if (initialPageSeen.value == null) {
+          initialPageSeen.value = pageIndex;
+        } else if (pageIndex != initialPageSeen.value) {
+          userHasScrolled.value = true;
+        }
+
         final cursorChapterId = item.owningChapter.id;
         if (cursorChapterId != activeChapterId.value) {
-          final outgoing = activeChapterId.value;
-          activeChapterId.value = cursorChapterId;
-          currentPageInChapter.value =
-              item is ReaderItemPage ? item.pageIndex : 0;
-          markChapterAsRead(outgoing);
+          // Dwell-time guard: don't flip active until the cursor has
+          // stayed in the new chapter for activeChapterDwellTime. A
+          // momentary cross during fast PageView animation should not
+          // trigger mark-as-read.
+          activeChapterDwellTimer.value?.cancel();
+          activeChapterDwellTimer.value =
+              Timer(_Config.activeChapterDwellTime, () {
+            if (!pageController.hasClients) return;
+            final livePage = pageController.page?.round();
+            if (livePage == null ||
+                livePage < 0 ||
+                livePage >= items.length) {
+              return;
+            }
+            final liveItem = items[livePage];
+            if (liveItem.owningChapter.id != cursorChapterId) return;
+            if (cursorChapterId == activeChapterId.value) return;
+
+            final outgoing = activeChapterId.value;
+            activeChapterId.value = cursorChapterId;
+            currentPageInChapter.value =
+                liveItem is ReaderItemPage ? liveItem.pageIndex : 0;
+            markChapterAsRead(outgoing);
+          });
+        } else {
+          activeChapterDwellTimer.value?.cancel();
         }
+
+        // Gate pre-fetch on the user actually scrolling — same fix as
+        // continuous reader; prevents initial-render fires from
+        // triggering bogus backward pre-fetch.
+        if (!userHasScrolled.value) return;
+
+        final orderInfo = mangaChapterList == null
+            ? const <ChapterOrderInfo>[]
+            : [
+                for (final c in mangaChapterList)
+                  ChapterOrderInfo(
+                    id: c.id,
+                    chapterNumber: c.chapterNumber,
+                  ),
+              ];
 
         if (pageIndex >= items.length - _Config.preFetchThreshold) {
           final lastLoadedId = loadedChapterIds.value.last;
-          final next = _findAdjacentChapter(
-            mangaChapterList,
+          final nextId = findAdjacentChapterId(
+            orderInfo,
             lastLoadedId,
             offset: 1,
           );
-          if (next != null &&
-              !loadedChapterIds.value.contains(next.id)) {
-            loadedChapterIds.value = [...loadedChapterIds.value, next.id];
+          if (nextId != null &&
+              !loadedChapterIds.value.contains(nextId)) {
+            loadedChapterIds.value = [...loadedChapterIds.value, nextId];
           }
         }
 
         if (pageIndex < _Config.preFetchThreshold) {
           final firstLoadedId = loadedChapterIds.value.first;
-          final prev = _findAdjacentChapter(
-            mangaChapterList,
+          final prevId = findAdjacentChapterId(
+            orderInfo,
             firstLoadedId,
             offset: -1,
           );
-          if (prev != null &&
-              !loadedChapterIds.value.contains(prev.id)) {
-            loadedChapterIds.value = [prev.id, ...loadedChapterIds.value];
+          if (prevId != null &&
+              !loadedChapterIds.value.contains(prevId)) {
+            loadedChapterIds.value = [prevId, ...loadedChapterIds.value];
           }
         }
       }
@@ -373,18 +430,6 @@ class SinglePageReaderMode extends HookConsumerWidget {
     );
   }
 
-  static ChapterDto? _findAdjacentChapter(
-    List<ChapterDto>? chapters,
-    int relativeTo, {
-    required int offset,
-  }) {
-    if (chapters == null) return null;
-    final i = chapters.indexWhere((c) => c.id == relativeTo);
-    if (i == -1) return null;
-    final target = i + offset;
-    if (target < 0 || target >= chapters.length) return null;
-    return chapters[target];
-  }
 
   static int _initialPageIndex(
     List<ReaderItem> items,

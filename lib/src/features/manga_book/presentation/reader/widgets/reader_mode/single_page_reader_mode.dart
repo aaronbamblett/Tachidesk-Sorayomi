@@ -84,9 +84,12 @@ class SinglePageReaderMode extends HookConsumerWidget {
     // Dwell-time debounce on active-chapter changes (see _Config).
     final activeChapterDwellTimer = useRef<Timer?>(null);
 
-    // Tracks whether the user has actually moved from their initial page.
-    final initialPageSeen = useRef<int?>(null);
-    final userHasScrolled = useRef<bool>(false);
+    // Current scroll direction, updated from ScrollNotification below.
+    // Starts at `neutral` so neither pre-fetch fires on initial render.
+    // (Named with a `Ref` suffix to avoid shadowing the widget's
+    // `scrollDirection: Axis` constructor parameter.)
+    final scrollDirectionRef =
+        useRef<ScrollDirection>(ScrollDirection.neutral);
 
     Future<void> markChapterAsRead(int chapterId) async {
       if (markedAsRead.value.contains(chapterId)) return;
@@ -213,15 +216,6 @@ class SinglePageReaderMode extends HookConsumerWidget {
           }
         }
 
-        // Track whether the user has actually moved from their initial
-        // page — guards initial-render position-listener fires from
-        // triggering pre-fetch of the wrong chapter.
-        if (initialPageSeen.value == null) {
-          initialPageSeen.value = pageIndex;
-        } else if (pageIndex != initialPageSeen.value) {
-          userHasScrolled.value = true;
-        }
-
         final cursorChapterId = item.owningChapter.id;
         if (cursorChapterId != activeChapterId.value) {
           // Dwell-time guard: don't flip active until the cursor has
@@ -252,11 +246,6 @@ class SinglePageReaderMode extends HookConsumerWidget {
           activeChapterDwellTimer.value?.cancel();
         }
 
-        // Gate pre-fetch on the user actually scrolling — same fix as
-        // continuous reader; prevents initial-render fires from
-        // triggering bogus backward pre-fetch.
-        if (!userHasScrolled.value) return;
-
         final orderInfo = mangaChapterList == null
             ? const <ChapterOrderInfo>[]
             : [
@@ -267,7 +256,15 @@ class SinglePageReaderMode extends HookConsumerWidget {
                   ),
               ];
 
-        if (pageIndex >= items.length - _Config.preFetchThreshold) {
+        // Pre-fetch decisions gated on scroll direction; see continuous
+        // reader for the full rationale (the page-zero-then-scroll-forward
+        // cascade that was eating chapters).
+        if (shouldPrefetchForward(
+          mostVisibleIndex: pageIndex,
+          itemsLength: items.length,
+          threshold: _Config.preFetchThreshold,
+          direction: scrollDirectionRef.value,
+        )) {
           final lastLoadedId = loadedChapterIds.value.last;
           final nextId = findAdjacentChapterId(
             orderInfo,
@@ -280,7 +277,11 @@ class SinglePageReaderMode extends HookConsumerWidget {
           }
         }
 
-        if (pageIndex < _Config.preFetchThreshold) {
+        if (shouldPrefetchBackward(
+          mostVisibleIndex: pageIndex,
+          threshold: _Config.preFetchThreshold,
+          direction: scrollDirectionRef.value,
+        )) {
           final firstLoadedId = loadedChapterIds.value.first;
           final prevId = findAdjacentChapterId(
             orderInfo,
@@ -382,14 +383,28 @@ class SinglePageReaderMode extends HookConsumerWidget {
         curve: kCurve,
       ),
       pageController: pageController,
-      child: PageView.builder(
-        scrollDirection: scrollDirection,
-        reverse: reverse,
-        controller: pageController,
-        allowImplicitScrolling: true,
-        physics: const BouncingScrollPhysics(
-            parent: AlwaysScrollableScrollPhysics()),
-        itemBuilder: (BuildContext context, int index) {
+      child: NotificationListener<ScrollNotification>(
+        onNotification: (notification) {
+          if (notification is ScrollUpdateNotification) {
+            final delta = notification.scrollDelta ?? 0;
+            if (delta > 0) {
+              scrollDirectionRef.value = ScrollDirection.down;
+            } else if (delta < 0) {
+              scrollDirectionRef.value = ScrollDirection.up;
+            }
+          } else if (notification is ScrollEndNotification) {
+            scrollDirectionRef.value = ScrollDirection.neutral;
+          }
+          return false;
+        },
+        child: PageView.builder(
+          scrollDirection: scrollDirection,
+          reverse: reverse,
+          controller: pageController,
+          allowImplicitScrolling: true,
+          physics: const BouncingScrollPhysics(
+              parent: AlwaysScrollableScrollPhysics()),
+          itemBuilder: (BuildContext context, int index) {
           if (items.isEmpty || index >= items.length) {
             return const Center(child: CenterSorayomiShimmerIndicator());
           }
@@ -425,7 +440,8 @@ class SinglePageReaderMode extends HookConsumerWidget {
               );
           }
         },
-        itemCount: items.isEmpty ? 1 : items.length,
+          itemCount: items.isEmpty ? 1 : items.length,
+        ),
       ),
     );
   }

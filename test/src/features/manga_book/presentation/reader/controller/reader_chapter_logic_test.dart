@@ -117,6 +117,156 @@ void main() {
     });
   });
 
+  group('shouldPrefetchForward', () {
+    test('false when itemsLength is 0', () {
+      expect(
+        shouldPrefetchForward(
+          mostVisibleIndex: 0,
+          itemsLength: 0,
+          threshold: 5,
+          direction: ScrollDirection.down,
+        ),
+        isFalse,
+      );
+    });
+
+    test('false when direction is neutral (user idle)', () {
+      expect(
+        shouldPrefetchForward(
+          mostVisibleIndex: 95,
+          itemsLength: 100,
+          threshold: 5,
+          direction: ScrollDirection.neutral,
+        ),
+        isFalse,
+      );
+    });
+
+    test('false when direction is up (user scrolling backward)', () {
+      // Edge case: user is near the end of the items list but scrolling
+      // away from it. They should not trigger a forward pre-fetch.
+      expect(
+        shouldPrefetchForward(
+          mostVisibleIndex: 95,
+          itemsLength: 100,
+          threshold: 5,
+          direction: ScrollDirection.up,
+        ),
+        isFalse,
+      );
+    });
+
+    test('true when within threshold of end AND scrolling down', () {
+      expect(
+        shouldPrefetchForward(
+          mostVisibleIndex: 95,
+          itemsLength: 100,
+          threshold: 5,
+          direction: ScrollDirection.down,
+        ),
+        isTrue,
+      );
+    });
+
+    test('false when far from end even if scrolling down', () {
+      expect(
+        shouldPrefetchForward(
+          mostVisibleIndex: 50,
+          itemsLength: 100,
+          threshold: 5,
+          direction: ScrollDirection.down,
+        ),
+        isFalse,
+      );
+    });
+
+    test('true at exact boundary (itemsLength - threshold)', () {
+      expect(
+        shouldPrefetchForward(
+          mostVisibleIndex: 95,
+          itemsLength: 100,
+          threshold: 5,
+          direction: ScrollDirection.down,
+        ),
+        isTrue,
+      );
+    });
+  });
+
+  group('shouldPrefetchBackward', () {
+    test('false when direction is neutral (user idle)', () {
+      expect(
+        shouldPrefetchBackward(
+          mostVisibleIndex: 0,
+          threshold: 5,
+          direction: ScrollDirection.neutral,
+        ),
+        isFalse,
+      );
+    });
+
+    test('false when direction is down (the real-world cascade case)', () {
+      // The bug this gate fixes: opening a chapter at page 0 puts
+      // mostVisibleIndex at 0 (within threshold), and any scrolling
+      // (most commonly forward / down) used to spuriously trigger
+      // backward pre-fetch and cascade the user backward through the
+      // manga. With the direction gate, scrolling down near the start
+      // does not trigger a backward pre-fetch.
+      expect(
+        shouldPrefetchBackward(
+          mostVisibleIndex: 0,
+          threshold: 5,
+          direction: ScrollDirection.down,
+        ),
+        isFalse,
+      );
+    });
+
+    test('true when scrolling up AND within threshold of start', () {
+      expect(
+        shouldPrefetchBackward(
+          mostVisibleIndex: 0,
+          threshold: 5,
+          direction: ScrollDirection.up,
+        ),
+        isTrue,
+      );
+    });
+
+    test('false when scrolling up but far from start', () {
+      expect(
+        shouldPrefetchBackward(
+          mostVisibleIndex: 50,
+          threshold: 5,
+          direction: ScrollDirection.up,
+        ),
+        isFalse,
+      );
+    });
+
+    test('true at the boundary (threshold - 1)', () {
+      expect(
+        shouldPrefetchBackward(
+          mostVisibleIndex: 4,
+          threshold: 5,
+          direction: ScrollDirection.up,
+        ),
+        isTrue,
+      );
+    });
+
+    test('false at exactly the threshold', () {
+      expect(
+        shouldPrefetchBackward(
+          mostVisibleIndex: 5,
+          threshold: 5,
+          direction: ScrollDirection.up,
+        ),
+        isFalse,
+      );
+    });
+  });
+
   group('orderChapterIdsForReading', () {
     test('returns ids in chapter-number ascending order regardless of input',
         () {

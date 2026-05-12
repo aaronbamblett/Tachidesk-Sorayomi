@@ -66,3 +66,57 @@ List<int> orderChapterIdsForReading(List<ChapterOrderInfo> chapters) {
     ..sort((a, b) => a.chapterNumber.compareTo(b.chapterNumber));
   return [for (final c in sorted) c.id];
 }
+
+/// Current scroll direction, used to gate pre-fetch decisions.
+///
+/// `up` and `down` refer to how the user is moving through the items
+/// list, not screen direction: `down` is scrolling toward later items
+/// (later pages, next chapter); `up` is scrolling toward earlier items
+/// (earlier pages, previous chapter). `neutral` is idle / stationary.
+enum ScrollDirection { up, down, neutral }
+
+/// Whether the reader should pre-fetch the NEXT chapter from the
+/// current state.
+///
+/// Triggers only when:
+/// - The user has scrolled close enough to the end of the loaded items
+///   list (within `threshold` of `itemsLength`), AND
+/// - The user is actively scrolling DOWN (toward later items).
+///
+/// The direction gate stops a user who is scrolling up near the end of
+/// the loaded list (rare, but possible) from triggering a forward
+/// pre-fetch they don't want.
+bool shouldPrefetchForward({
+  required int mostVisibleIndex,
+  required int itemsLength,
+  required int threshold,
+  required ScrollDirection direction,
+}) {
+  if (itemsLength <= 0) return false;
+  if (direction != ScrollDirection.down) return false;
+  return mostVisibleIndex >= itemsLength - threshold;
+}
+
+/// Whether the reader should pre-fetch the PREVIOUS chapter from the
+/// current state.
+///
+/// Triggers only when:
+/// - The user is close to the start of the loaded items list (within
+///   `threshold` of index 0), AND
+/// - The user is actively scrolling UP (toward earlier items).
+///
+/// The direction gate is the load-bearing piece: opening a chapter at
+/// page 0 puts the user at `mostVisibleIndex < threshold` immediately,
+/// and any subsequent scroll (most often forward) used to trigger a
+/// backward pre-fetch and prepend a wrong-direction chapter. The
+/// direction gate ensures pre-fetch only fires when the user has
+/// signalled real intent to read the previous chapter by scrolling up
+/// near the boundary.
+bool shouldPrefetchBackward({
+  required int mostVisibleIndex,
+  required int threshold,
+  required ScrollDirection direction,
+}) {
+  if (direction != ScrollDirection.up) return false;
+  return mostVisibleIndex < threshold;
+}

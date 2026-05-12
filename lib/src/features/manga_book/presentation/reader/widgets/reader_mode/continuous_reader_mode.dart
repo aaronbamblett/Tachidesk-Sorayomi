@@ -108,13 +108,14 @@ class ContinuousReaderMode extends HookConsumerWidget {
     // Dwell-time debounce on active-chapter changes (see _ScrollConfig).
     final activeChapterDwellTimer = useRef<Timer?>(null);
 
-    // Tracks whether the user has actually moved from their initial scroll
-    // position. Until they do, the position listener's first fires report
-    // indices from the top of the viewport (BEFORE the initial scroll-to
-    // jump has resolved) which would otherwise trigger spurious backward
-    // pre-fetch of the wrong chapter.
-    final initialMostVisible = useRef<int?>(null);
-    final userHasScrolled = useRef<bool>(false);
+    // Current scroll direction, updated from ScrollNotification below.
+    // Starts at `neutral` so neither pre-fetch fires on initial render.
+    // Resets to neutral on ScrollEndNotification so a stopped user
+    // doesn't keep triggering pre-fetches based on their last movement.
+    // (Named with a `Ref` suffix to avoid shadowing the widget's
+    // `scrollDirection: Axis` constructor parameter.)
+    final scrollDirectionRef =
+        useRef<ScrollDirection>(ScrollDirection.neutral);
 
     Future<void> markChapterAsRead(int chapterId) async {
       if (markedAsRead.value.contains(chapterId)) return;
@@ -250,16 +251,6 @@ class ContinuousReaderMode extends HookConsumerWidget {
           }
         }
 
-        // Track whether the user has actually moved from their initial
-        // scroll position. Position listener fires on initial layout
-        // with stale-looking positions before the initial scroll-to
-        // jump resolves — those fires must NOT trigger pre-fetch.
-        if (initialMostVisible.value == null) {
-          initialMostVisible.value = mostVisibleIndex;
-        } else if (mostVisibleIndex != initialMostVisible.value) {
-          userHasScrolled.value = true;
-        }
-
         final cursorChapterId = item.owningChapter.id;
         if (cursorChapterId != activeChapterId.value) {
           // Schedule the active-chapter flip after a dwell time. If the
@@ -294,13 +285,6 @@ class ContinuousReaderMode extends HookConsumerWidget {
           activeChapterDwellTimer.value?.cancel();
         }
 
-        // Pre-fetch is only ever triggered by deliberate user scrolling,
-        // not by the initial layout. Without this guard the first
-        // position-listener fires (which report items 0..N before the
-        // initial scroll-to-lastPageRead jump completes) would trigger
-        // backward pre-fetch and prepend the wrong chapter to the list.
-        if (!userHasScrolled.value) return;
-
         // Convert the chapter list to the minimal info the adjacency
         // helper needs. The helper sorts by chapterNumber explicitly so
         // we get correct reading-order navigation regardless of how the
@@ -315,11 +299,19 @@ class ContinuousReaderMode extends HookConsumerWidget {
                   ),
               ];
 
-        // Forward pre-fetch: if we're within N items of the end of
-        // the loaded list AND there's a chapter after the last loaded
-        // one in reading order, append it.
-        if (mostVisibleIndex >=
-            items.length - _ScrollConfig.preFetchPagesThreshold) {
+        // Pre-fetch decisions go through `shouldPrefetch{Forward,Backward}`,
+        // which gate on scroll direction. The direction is `neutral` until
+        // the user actually scrolls, which prevents initial-render fires
+        // from triggering anything; and `down` / `up` are mutually
+        // exclusive, which prevents the scroll-forward-from-page-0 case
+        // (mostVisibleIndex stays in [0..threshold) for a while) from
+        // triggering backward pre-fetch.
+        if (shouldPrefetchForward(
+          mostVisibleIndex: mostVisibleIndex,
+          itemsLength: items.length,
+          threshold: _ScrollConfig.preFetchPagesThreshold,
+          direction: scrollDirectionRef.value,
+        )) {
           final lastLoadedId = loadedChapterIds.value.last;
           final nextId = findAdjacentChapterId(
             orderInfo,
@@ -332,11 +324,11 @@ class ContinuousReaderMode extends HookConsumerWidget {
           }
         }
 
-        // Backward pre-fetch: if we're within N items of the start of
-        // the loaded list AND there's a chapter before the first loaded
-        // one in reading order, prepend it. The scroll-anchor effect
-        // compensates the scroll position once those pages stream in.
-        if (mostVisibleIndex < _ScrollConfig.preFetchPagesThreshold) {
+        if (shouldPrefetchBackward(
+          mostVisibleIndex: mostVisibleIndex,
+          threshold: _ScrollConfig.preFetchPagesThreshold,
+          direction: scrollDirectionRef.value,
+        )) {
           final firstLoadedId = loadedChapterIds.value.first;
           final prevId = findAdjacentChapterId(
             orderInfo,
@@ -429,25 +421,40 @@ class ContinuousReaderMode extends HookConsumerWidget {
                 isPinchToZoomEnabled
             ? (Widget child) => InteractiveViewer(maxScale: 5, child: child)
             : null,
-        ScrollablePositionedList.builder(
-          itemScrollController: scrollController,
-          itemPositionsListener: positionsListener,
-          initialScrollIndex: _initialScrollIndex(items, activeChapter),
-          scrollDirection: scrollDirection,
-          reverse: reverse,
-          itemCount: items.length,
-          minCacheExtent: scrollDirection == Axis.vertical
-              ? context.height * 2
-              : context.width * 2,
-          itemBuilder: (context, index) {
-            final item = items[index];
-            switch (item) {
-              case ReaderItemPage():
-                return _buildPage(context, item);
-              case ReaderItemSeparator():
-                return _buildSeparator(context, item);
+        NotificationListener<ScrollNotification>(
+          onNotification: (notification) {
+            if (notification is ScrollUpdateNotification) {
+              final delta = notification.scrollDelta ?? 0;
+              if (delta > 0) {
+                scrollDirectionRef.value = ScrollDirection.down;
+              } else if (delta < 0) {
+                scrollDirectionRef.value = ScrollDirection.up;
+              }
+            } else if (notification is ScrollEndNotification) {
+              scrollDirectionRef.value = ScrollDirection.neutral;
             }
+            return false;
           },
+          child: ScrollablePositionedList.builder(
+            itemScrollController: scrollController,
+            itemPositionsListener: positionsListener,
+            initialScrollIndex: _initialScrollIndex(items, activeChapter),
+            scrollDirection: scrollDirection,
+            reverse: reverse,
+            itemCount: items.length,
+            minCacheExtent: scrollDirection == Axis.vertical
+                ? context.height * 2
+                : context.width * 2,
+            itemBuilder: (context, index) {
+              final item = items[index];
+              switch (item) {
+                case ReaderItemPage():
+                  return _buildPage(context, item);
+                case ReaderItemSeparator():
+                  return _buildSeparator(context, item);
+              }
+            },
+          ),
         ),
       ),
     );

@@ -162,6 +162,28 @@ class ContinuousReaderMode extends HookConsumerWidget {
               chapterAtCursor.id == activeChapterId.value) {
             currentPageInChapter.value = item.pageIndex;
           }
+
+          // Mark the active chapter as read when the user reaches its
+          // last page. Catches both the normal case (we'll also mark on
+          // boundary crossing below) and the very-last-chapter case where
+          // there is no next chapter to cross into.
+          if (item.isLastPageOfChapter &&
+              chapterAtCursor.id == activeChapterId.value) {
+            markChapterAsRead(chapterAtCursor.id);
+          }
+        }
+
+        // Also handle the "last image is shorter than the viewport"
+        // edge case: if the very last item in the items list is in view
+        // and the scroll has reached its end, treat the active chapter
+        // as fully viewed. Mirrors the webtoon-read-detection fix on the
+        // new multi-chapter item list.
+        if (mostVisibleIndex == items.length - 1) {
+          final last = items[mostVisibleIndex];
+          if (last is ReaderItemPage &&
+              last.chapter.id == activeChapterId.value) {
+            markChapterAsRead(last.chapter.id);
+          }
         }
 
         // Schedule a debounced active-chapter switch so quick crossings

@@ -144,6 +144,89 @@ void main() {
     });
   });
 
+  group('reproducing the reader\'s real gesture stack', () {
+    testWidgets(
+        'GestureDetector(onPanEnd + onLongPress + onTap) wrapping ZoomView: '
+        'does the outer pan recognizer eat the pinch?', (tester) async {
+      tester.view.devicePixelRatio = 1.0;
+      tester.view.physicalSize = const Size(_viewportWidth, _viewportHeight);
+      addTearDown(() {
+        tester.view.resetDevicePixelRatio();
+        tester.view.resetPhysicalSize();
+      });
+
+      double? lastScale;
+      var outerPanEnds = 0;
+      final scrollOffsetController = ScrollOffsetController();
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: SizedBox(
+              width: _viewportWidth,
+              height: _viewportHeight,
+              // This mimics the structure inside ReaderWrapper:
+              // DirectionalSwipeGestureHandler wraps everything in a
+              // GestureDetector with onPanEnd, onTap, onLongPress*. That
+              // GestureDetector sits ABOVE ZoomView in the widget tree.
+              child: GestureDetector(
+                behavior: HitTestBehavior.translucent,
+                onTap: () {},
+                onLongPressStart: (_) {},
+                onLongPressEnd: (_) {},
+                onLongPressMoveUpdate: (_) {},
+                onPanEnd: (_) => outerPanEnds++,
+                child: ZoomView(
+                  controller: ScrollOffsetToScrollController(
+                    scrollOffsetController: scrollOffsetController,
+                  ),
+                  scrollAxis: Axis.vertical,
+                  maxScale: 5,
+                  forceHoldOnPointerDown: true,
+                  onScaleChanged: (s) => lastScale = s,
+                  child: ScrollablePositionedList.builder(
+                    scrollOffsetController: scrollOffsetController,
+                    itemCount: 50,
+                    itemBuilder: (context, index) => SizedBox(
+                      height: _itemHeight,
+                      child: Text('Item $index'),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await _simulatePinchOut(tester);
+
+      printOnFailure('lastScale: $lastScale');
+      printOnFailure('outerPanEnds: $outerPanEnds');
+
+      // If the outer GestureDetector eats the pinch (the device-side
+      // hypothesis), lastScale stays null and outerPanEnds increments.
+      // If ZoomView still wins, lastScale is non-null.
+      if (lastScale == null && outerPanEnds > 0) {
+        fail(
+          'OUTER GESTURE DETECTOR ATE THE PINCH (reproduced in test env). '
+          'lastScale=$lastScale, outerPanEnds=$outerPanEnds. This is '
+          'the device-side bug.',
+        );
+      } else if (lastScale == null) {
+        fail(
+          'pinch did not fire scale but the outer GestureDetector also '
+          'did not see a pan-end. Some other recognizer is eating the '
+          'gesture. lastScale=$lastScale, outerPanEnds=$outerPanEnds.',
+        );
+      }
+      // If we reach here, scale fired despite the outer wrapper — the
+      // outer-GD-eats-pinch hypothesis is wrong (in test env at least).
+      expect(lastScale, greaterThan(1.0));
+    });
+  });
+
   group('limitations of these tests (read this before relying on them)', () {
     test(
         'widget-test gesture arena does NOT reproduce real-device multi-touch '

@@ -9,6 +9,7 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 
 import '../../../../../constants/enum.dart';
 import '../../../../../routes/router_config.dart';
+import '../../../../../widgets/zoom/reader_gesture_diagnostics.dart';
 import '../../../domain/chapter/chapter_model.dart';
 import '../../../domain/chapter_page/chapter_page_model.dart';
 import '../utils/last_page_swipe_utils.dart';
@@ -74,6 +75,7 @@ class DirectionalSwipeGestureHandler extends HookWidget {
       onTap: onTap,
       behavior: HitTestBehavior.translucent,
       onPanEnd: (details) {
+        ReaderGestureDiagnostics.instance.bumpOuterPanEnd();
         final swipeDirection = LastPageSwipeUtils.detectSwipeDirection(details);
 
         if (swipeDirection != null) {
@@ -97,6 +99,7 @@ class DirectionalSwipeGestureHandler extends HookWidget {
       onTap: onTap,
       behavior: HitTestBehavior.translucent,
       onHorizontalDragEnd: (details) {
+        ReaderGestureDiagnostics.instance.bumpOuterPanEnd();
         _handleSwipeGesture(
           context: context,
           details: details,
@@ -104,6 +107,7 @@ class DirectionalSwipeGestureHandler extends HookWidget {
         );
       },
       onVerticalDragEnd: (details) {
+        ReaderGestureDiagnostics.instance.bumpOuterPanEnd();
         _handleSwipeGesture(
           context: context,
           details: details,

@@ -24,6 +24,7 @@ import '../../../../../utils/extensions/custom_extensions.dart';
 import '../../../../../utils/launch_url_in_web.dart';
 import '../../../../../utils/misc/toast/toast.dart';
 import '../../../../../widgets/popup_widgets/radio_list_popup.dart';
+import '../../../../../widgets/zoom/reader_gesture_diagnostics.dart';
 import '../../../../settings/presentation/reader/widgets/reader_initial_overlay_tile/reader_initial_overlay_tile.dart';
 import '../../../../settings/presentation/reader/widgets/reader_invert_tap_tile/reader_invert_tap_tile.dart';
 import '../../../../settings/presentation/reader/widgets/reader_last_page_swipe_tile/reader_last_page_swipe_tile.dart';
@@ -925,6 +926,7 @@ class ReaderView extends HookWidget {
     return Stack(
       children: [
         content,
+        const ReaderGestureDiagnosticsOverlay(),
         ReaderNavigationLayoutWidget(
           onNext: onNext,
           onPrevious: onPrevious,

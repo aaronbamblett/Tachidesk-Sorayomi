@@ -18,6 +18,7 @@ import 'package:zoom_view/zoom_view.dart';
 import '../../../../../../utils/extensions/custom_extensions.dart';
 import '../../../../../../utils/misc/app_utils.dart';
 import '../../../../../../widgets/server_image.dart';
+import '../../../../../../widgets/zoom/reader_gesture_diagnostics.dart';
 import '../../../../../../widgets/zoom/scroll_offset_to_scroll_controller.dart';
 import '../../../../../settings/presentation/reader/widgets/reader_pinch_to_zoom/reader_pinch_to_zoom.dart';
 import '../../../../../settings/presentation/reader/widgets/reader_scroll_animation_tile/reader_scroll_animation_tile.dart';
@@ -194,18 +195,21 @@ class ContinuousReaderMode extends HookConsumerWidget {
         !kIsWeb &&
                 (Platform.isAndroid || Platform.isIOS) &&
                 isPinchToZoomEnabled
-            ? (Widget child) => ZoomView(
-                  controller: zoomScrollController,
-                  scrollAxis: scrollDirection,
-                  maxScale: 5,
-                  doubleTapDrag: true,
-                  // Required when the child is a ScrollablePositionedList:
-                  // its inner drag recognizer would otherwise win the
-                  // gesture arena over ZoomView's scale recognizer, so
-                  // pinches never register. Holding the scroll position
-                  // on pointer-down lets the scale recognizer win.
-                  forceHoldOnPointerDown: true,
-                  child: child,
+            ? (Widget child) => Listener(
+                  behavior: HitTestBehavior.translucent,
+                  onPointerDown: (_) =>
+                      ReaderGestureDiagnostics.instance.bumpPointerDown(),
+                  child: ZoomView(
+                    controller: zoomScrollController,
+                    scrollAxis: scrollDirection,
+                    maxScale: 5,
+                    doubleTapDrag: true,
+                    forceHoldOnPointerDown: true,
+                    onScaleChanged: (s) => ReaderGestureDiagnostics
+                        .instance
+                        .bumpScaleEvent(s),
+                    child: child,
+                  ),
                 )
             : null,
         ScrollablePositionedList.separated(
